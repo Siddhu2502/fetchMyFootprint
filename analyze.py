@@ -1015,19 +1015,12 @@ def _conservative_hours(text: str, tools: list, premium_reqs: int = 0, tokens_to
 
 
 def _summarize_message(text: str, tools: list) -> str:
-    """Generate a brief description from user message and tool calls."""
-    # Use the first line of the user message, cleaned up
-    first_line = text.split("\n")[0].strip()
-    # Truncate long messages
-    if len(first_line) > 80:
-        first_line = first_line[:77] + "..."
-    # If tools were used, mention the count
+    """Generate a brief description from user message and tool calls without exposing exact chat."""
     if tools:
-        return f"{first_line} ({len(tools)} tool calls)"
-    return first_line
+        return f"User collaborated with AI using {len(tools)} tool calls to accomplish the task."
+    return "User collaborated with AI to define logic and accomplish the task."
 
 
-def _fallback_analysis(target_date: str, sessions: list) -> dict:
     goals = []
     for s in sessions:
         user_msgs = [m for m in s["messages"] if m["role"] == "user"]
@@ -1039,8 +1032,7 @@ def _fallback_analysis(target_date: str, sessions: list) -> dict:
             text, tools = msg["text"], msg.get("tools_after", [])
             hours = _conservative_hours(text, tools, s.get("premium_requests", 0), s.get("tokens", {}).get("total", 0))
             domain, tech, task_type, prof_roles = _infer_skills(text, tools)
-            first = text.split("\n")[0].strip()
-            title = (first if not first[0].isdigit() else text[:75])[:75]
+            title = "Task completed by User and AI"
             tasks.append({
                 "title":              title,
                 "what_got_done":      _summarize_message(text, tools),

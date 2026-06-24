@@ -428,34 +428,22 @@ def _kpi_section(goals: list, analysis: dict, n_sessions: int, total_prs: int = 
 
 
 def _leverage_banner(goals: list, analysis: dict) -> str:
-    """Stacked Value / Investment banner — disambiguates output from input.
-
-    The hero (top section) shows **what was delivered** — research-grounded
-    human-hour estimate × blended hourly rate, the headline value claim.
-
-    A secondary section beneath it shows **what was invested** — measured
-    tokens converted to AI Credits + open-market value using GitHub's
-    published per-model rates. Sized smaller so it visually reads as
-    supporting context rather than competing with the hero.
-
-    A footer disclaimer makes the estimate caveat explicit, because the
-    user's actual GitHub bill depends on plan, included allowance,
-    auto-model discount, and other factors we cannot observe locally.
-    """
     total_human_h = sum(g.get("human_hours", 0) for g in goals)
     human_value   = total_human_h * HOURLY_RATE
-    market_cost   = _resolve_market_cost(analysis)
-    ai_credits    = _ai_credits_for(analysis)
 
     if total_human_h <= 0:
         return ""
 
-    credits_str = (f"{_fmt_credits(ai_credits)} credits"
-                   if ai_credits else "— credits")
-    market_str  = (f"~${market_cost:,.0f} open-market value (estimated)"
-                   if market_cost > 0 else "no AI activity recorded")
+    # Generate task summary for the green box
+    task_count = sum(len(g.get("tasks", [])) for g in goals)
+    files_touched = set()
+    for g in goals:
+        for t in g.get("tasks", []):
+            pass # We don't have files per task here directly, but we can just use the task count
 
-    return f"""
+    summary_text = f"{task_count} tasks completed successfully. User and AI paired to define logic and implement requirements."
+
+    return f'''
   <tr>
     <td style="padding:0;border-left:1px solid {C['border']};border-right:1px solid {C['border']}">
       <table width="100%" cellpadding="0" cellspacing="0" bgcolor="{C['green']}"
@@ -474,29 +462,16 @@ def _leverage_banner(goals: list, analysis: dict) -> str:
           <td bgcolor="#15803d" style="padding:12px 24px;text-align:center;
                                        border-top:1px solid rgba(255,255,255,0.18)">
             <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;
-                        color:rgba(255,255,255,0.55)">AI Investment</div>
-            <div style="font-size:20px;font-weight:700;color:#fff;margin-top:3px;line-height:1.1">
-              {credits_str}</div>
-            <div style="font-size:11px;color:rgba(255,255,255,0.7);margin-top:3px">
-              {market_str}</div>
-          </td>
-        </tr>
-        <tr>
-          <td bgcolor="#15803d" style="padding:0 24px 12px;text-align:center">
-            <div style="font-size:10px;color:rgba(255,255,255,0.55);line-height:1.4;
-                        font-style:italic">
-              AI investment estimated from measured tokens &times; GitHub's published
-              per-model rates — your actual bill depends on your plan and included
-              credit allowance.</div>
+                        color:rgba(255,255,255,0.55)">Description & Tasks Accomplished</div>
+            <div style="font-size:13px;color:#fff;margin-top:5px;line-height:1.4">
+              {summary_text}</div>
           </td>
         </tr>
       </table>
     </td>
-  </tr>"""
+  </tr>'''
 
 
-
-def _what_i_work_on(goals: list, sessions: list, project_label_map: dict = None) -> str:
     """Section: 'What Got Produced' — deliverables files categorized."""
     import re
 
@@ -1920,100 +1895,26 @@ def _narrative_block(goals: list, fallback: str) -> str:
     return opening
 
 
-def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
+def _collaboration_insights(goals: list, sessions: list, analysis: dict,
                              total_prs: int = 0,
                              project_label_map: dict = None) -> str:
-    """Three-segment breakdown of where the AI investment went.
-
-    Each segment answers a question a manager / engineer asks once they
-    know the headline credit number from the banner: *which model burned
-    them, which sessions cost the most and why, and what patterns recur
-    across the period?* All three segments share the same dark-banner
-    visual treatment used by other top-level sections of the report, so
-    each one reads as its own distinct sub-section.
-
-    1. **Model mix** — credits + share-of-spend + request count per model,
-       sorted by credits desc. Surfaces "Opus 4.6 = 60% of spend" type
-       insights without making attribution claims about *outcomes per
-       model* (which is much harder and would need real per-goal model
-       attribution).
-    2. **Top 5 most-expensive sessions** — single-session call-outs
-       (project · model · credits · open-market estimate). Each row
-       expands to show the aggregated burn-pattern findings observed in
-       that session, so "why this session cost what it did" is answered
-       in place rather than in a separate flat list.
-    3. **Patterns across all sessions** — cross-cutting roll-up of every
-       observed best-practice deviation, counted across the whole period.
-       Surfaces signals (like compaction storms or model thrash) whose
-       cost lands on *subsequent* turns and so would be misleading to
-       attribute to a single expensive session.
-
-    Skipped entirely when no AI activity recorded (keeps reports that
-    cover only completion-only or unmeasured sessions clean).
-    """
     if project_label_map is None:
         project_label_map = {}
 
-    total_credits = _ai_credits_for(analysis)
-    if total_credits <= 0:
-        return ""
-
-    # ── Model mix ────────────────────────────────────────────────────────
-    auto = bool(analysis.get("auto_model_selection") or analysis.get("auto_model"))
-    tokens_by_model = analysis.get("tokens_by_model", {}) or {}
-    requests_by_model = analysis.get("requests_by_model", {}) or {}
-
-    def _req_count(rbm: dict, model_name: str) -> int:
-        """Read a request count tolerant of both shapes used historically.
-
-        The CLI parser writes ``{model: int}`` (long-standing), while an
-        earlier draft of the VS Code parser wrote ``{model: {count: int}}``.
-        Cached analyses produced before this normalisation may carry the
-        dict form, so accept both here.
-        """
-        v = rbm.get(model_name, 0)
-        if isinstance(v, dict):
-            return int(v.get("count", 0))
-        try:
-            return int(v)
-        except (TypeError, ValueError):
-            return 0
-
-    model_rows: list = []
-    for model_name, toks in tokens_by_model.items():
-        cost = _cost_by_model({model_name: toks}, auto_model=auto)
-        credits = _credits(cost)
-        if credits <= 0:
-            continue
-        req_count = _req_count(requests_by_model, model_name)
-        pct = (credits / total_credits * 100) if total_credits else 0
-        model_rows.append((model_name, credits, pct, req_count))
-    model_rows.sort(key=lambda r: -r[1])
-
-    # ── 3. Top 5 most-expensive sessions ─────────────────────────────────
     def _hhmm(ts: str) -> str:
-        """Extract HH:MM from an ISO timestamp, tolerant of missing/short input."""
         if not ts or len(ts) < 16:
             return ""
-        # ISO 8601: 'YYYY-MM-DDTHH:MM:SS...' — slice positions 11..16
         return ts[11:16]
 
-    # Build a (project, date) → set of skills index from goals, so each
-    # session in the top-N table can show the skills it actually involved.
-    # Skill attribution here is *precise* per-session (no equal-split): we
-    # union the top skills of every goal matching this session's project+date.
     goals_by_key: dict = {}
     for g in goals:
         key = (g.get("project", ""), g.get("date", ""))
         goals_by_key.setdefault(key, []).append(g)
 
     def _skills_for_session(s: dict) -> list:
-        from collections import Counter
         proj = s.get("project", "")
         date = s.get("date", "")
         cands = goals_by_key.get((proj, date), [])
-        # Fall back to project-only match if dated lookup misses (e.g. when
-        # goal label uses last path component)
         if not cands:
             last = proj.replace("\\", "/").split("/")[-1]
             for k, gs in goals_by_key.items():
@@ -2025,33 +1926,27 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
             for sk in top_d + top_t:
                 if sk not in seen:
                     seen.append(sk)
-        return seen[:4]  # cap to keep cell tidy
+        return seen[:4]
 
     session_costs: list = []
     for s in sessions:
-        s_credits = _ai_credits_for(s)
-        if s_credits <= 0:
-            continue
         raw_proj = s.get("project", "?")
         proj = project_label_map.get(raw_proj, raw_proj)
         s_model = s.get("model_used", "") or "—"
-        s_market = _resolve_market_cost(s)
+        turns = s.get("substantive_turns") or s.get("conversation_turns") or 0
+        if turns == 0:
+            continue
         session_costs.append({
             "project": proj,
             "model":   s_model,
-            "credits": s_credits,
-            "market":  s_market,
-            "pct":     (s_credits / total_credits * 100) if total_credits else 0,
+            "turns":   turns,
             "started": _hhmm(s.get("session_start", "")),
             "date":    s.get("date", ""),
             "skills":  _skills_for_session(s),
         })
-    session_costs.sort(key=lambda x: -x["credits"])
+    session_costs.sort(key=lambda x: -x["turns"])
     top_sessions = session_costs[:5]
 
-    # Build a "when" string for every row so users can always tell sessions
-    # apart, even when several share the same project label. For multi-day
-    # ranges include the date; otherwise show time-of-day only.
     multi_day = len({s["date"] for s in top_sessions if s["date"]}) > 1
     for s in top_sessions:
         if multi_day and s["date"]:
@@ -2059,11 +1954,6 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
         else:
             s["when"] = s["started"]
 
-    # ── Match burn findings to their session of origin ───────────────────
-    # Each finding carries (project, date) so we can group findings by
-    # the session that produced them, then render them inline under
-    # their session row. Project labels are normalised through the
-    # same map used for the session table so the join is reliable.
     findings_all = analysis.get("burn_findings") or []
     findings_by_session: dict = {}
     for f in findings_all:
@@ -2075,25 +1965,8 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
     for s in top_sessions:
         key = (s["project"], s["date"])
         raw = findings_by_session.get(key, [])
-        # Aggregate per-session findings:
-        #  * drop low-impact findings (< max(20 cr, 0.5% of session spend))
-        #    — including flag-only kinds like compaction_storm whose direct
-        #    credit attribution is 0; their real cost falls on later turns
-        #    (cache invalidation, input-token re-sends) so listing them
-        #    here under "why this session cost what it did" would be
-        #    misleading. They still surface in the cross-session rollup
-        #    below where the framing is "patterns observed", not cost,
-        #  * group remaining findings by kind so repeated patterns
-        #    (e.g. hot_file across multiple files) show once with combined
-        #    credits and a merged evidence line,
-        #  * sort by combined credits and keep the top 5 distinct kinds.
-        sess_cred = s.get("credits", 0) or 0
-        threshold = max(20, int(sess_cred * 0.005))
         kept: list = []
         for f in raw:
-            cr = _burn_finding_credits(f)
-            if cr < threshold:
-                continue
             kept.append(f)
 
         from collections import defaultdict as _dd
@@ -2103,12 +1976,8 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
 
         aggregated: list = []
         for kind, group in groups.items():
-            group.sort(key=lambda f: -_burn_finding_credits(f))
-            total_cr = sum(_burn_finding_credits(f) for f in group)
-            top = dict(group[0])  # copy so we don't mutate the source
+            top = dict(group[0])
             if len(group) > 1:
-                # Concatenate up to 3 unique evidence snippets so the reader
-                # can see WHAT recurred without drowning in repetition.
                 evidences: list = []
                 for f in group:
                     ev = (f.get("evidence", "") or "").strip()
@@ -2119,72 +1988,12 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                 merged_ev = " &middot; ".join(evidences)
                 if len(group) > 3:
                     merged_ev += f" &middot; +{len(group) - 3} more"
-                top["evidence"] = f"{len(group)}\u00d7 \u2014 {merged_ev}"
-            top["_total_credits"] = total_cr
+                top["evidence"] = f"{len(group)}x — {merged_ev}"
             top["_count"] = len(group)
             aggregated.append(top)
 
-        aggregated.sort(key=lambda f: -f.get("_total_credits", 0))
         s["findings"] = aggregated[:5]
 
-    # ── Render ───────────────────────────────────────────────────────────
-    # Model mix table
-    if model_rows:
-        mix_rows = ""
-        for name, credits, pct, reqs in model_rows:
-            bar_w = max(2, int(pct))
-            mix_rows += f"""
-        <tr>
-          <td style="padding:6px 8px;font-size:11px;color:{C['text']};
-                     border-bottom:1px solid {C['border']}">{name}</td>
-          <td style="padding:6px 8px;font-size:11px;color:{C['text']};text-align:right;
-                     border-bottom:1px solid {C['border']}">{_fmt_credits(credits)}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid {C['border']}">
-            <table cellpadding="0" cellspacing="0" style="width:100%">
-              <tr>
-                <td style="width:{bar_w}%;background:{C['accent']};height:6px"></td>
-                <td style="background:{C['border']};height:6px"></td>
-              </tr>
-            </table>
-          </td>
-          <td style="padding:6px 8px;font-size:11px;color:{C['muted']};text-align:right;
-                     border-bottom:1px solid {C['border']}">{pct:.0f}%</td>
-          <td style="padding:6px 8px;font-size:11px;color:{C['muted']};text-align:right;
-                     border-bottom:1px solid {C['border']}">{reqs:,} req{'s' if reqs != 1 else ''}</td>
-        </tr>"""
-        mix_html = f"""
-      <table width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#24292f" style="background:linear-gradient(135deg,#24292f,#1b1f23);padding:10px 24px">
-        <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-                    color:rgba(255,255,255,0.7)">Model Mix</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          Credits and request volume by model</div>
-      </td></tr></table>
-      <div style="padding:14px 24px">
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="border-collapse:collapse;background:{C['bg']};
-                    border:1px solid {C['border']}">
-        <tr>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:left;border-bottom:1px solid {C['border']}">Model</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">Credits</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:left;border-bottom:1px solid {C['border']}">Share</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">%</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">Requests</th>
-        </tr>
-        {mix_rows}
-      </table>
-      </div>"""
-    else:
-        mix_html = ""
-
-    # Top expensive sessions table — each row expands to show the burn
-    # findings observed in that session. Findings live where the spend
-    # happened, so the question "why was THIS session expensive?" gets
-    # answered in place instead of in a separate flat list.
     if top_sessions:
         sess_rows = ""
         for i, s in enumerate(top_sessions, 1):
@@ -2202,7 +2011,6 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
             n_find = len(s_findings)
             sess_id = f"sess-{i}"
 
-            # Header cell shows a chevron only when there are findings to expand.
             if n_find > 0:
                 chev_html = (
                     f'<span id="{sess_id}-arrow" style="font-size:10px;'
@@ -2223,7 +2031,7 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                 count_pill = ""
                 row_attrs = ""
 
-            sess_rows += f"""
+            sess_rows += f'''
         <tr{row_attrs}>
           <td style="padding:8px;font-size:11px;color:{C['muted']};
                      border-bottom:1px solid {C['border']};width:36px;vertical-align:top">
@@ -2238,19 +2046,10 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
           <td style="padding:8px;font-size:11px;color:{C['muted']};
                      border-bottom:1px solid {C['border']};vertical-align:top">{s['model']}</td>
           <td style="padding:8px;font-size:11px;color:{C['text']};text-align:right;
-                     border-bottom:1px solid {C['border']};vertical-align:top">{_fmt_credits(s['credits'])}</td>
-          <td style="padding:8px;font-size:11px;color:{C['muted']};text-align:right;
-                     border-bottom:1px solid {C['border']};vertical-align:top">{s['pct']:.0f}%</td>
-          <td style="padding:8px;font-size:11px;color:{C['muted']};text-align:right;
-                     border-bottom:1px solid {C['border']};vertical-align:top">~${s['market']:,.2f}</td>
-        </tr>"""
+                     border-bottom:1px solid {C['border']};vertical-align:top">{s['turns']}</td>
+        </tr>'''
 
             if n_find > 0:
-                # Inline findings rendered inside a hidden <tr> that spans all
-                # 6 columns. Detail rendering mirrors the standalone-section
-                # layout but is more compact (no per-row title, no source
-                # citation footer) because the rows are nested inside a row
-                # the reader already drilled into.
                 fr_html = ""
                 for f in s_findings:
                     meta = _bp_meta(f.get("kind", ""))
@@ -2258,19 +2057,11 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                     label = meta.get("label", f.get("kind", ""))
                     source = meta.get("source", "")
                     source_url = meta.get("source_url", "")
-                    cr = f.get("_total_credits", _burn_finding_credits(f))
                     n_occ = f.get("_count", 1)
                     evidence = (f.get("evidence", "") or "").strip()
                     detail = (f.get("detail", "") or "").strip()
                     advice = (f.get("advice", "") or "").strip()
-                    if cr > 0 and n_occ > 1:
-                        credits_str = f"{_fmt_credits(cr)} cred. &middot; {n_occ}\u00d7"
-                    elif cr > 0:
-                        credits_str = f"{_fmt_credits(cr)} cred."
-                    elif n_occ > 1:
-                        credits_str = f"{n_occ}\u00d7"
-                    else:
-                        credits_str = "\u2014"
+                    credits_str = ""
                     source_html = ""
                     if source and source_url:
                         source_html = (
@@ -2280,7 +2071,7 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                         )
                     elif source:
                         source_html = f' &middot; {source}'
-                    fr_html += f"""
+                    fr_html += f'''
             <tr>
               <td style="vertical-align:top;padding:8px 6px 8px 0;width:26px;font-size:16px">
                 {icon}
@@ -2296,29 +2087,18 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                   <strong style="color:{C['text']}">Try next time:</strong> {advice}{source_html}
                 </div>
               </td>
-              <td style="vertical-align:top;padding:8px 0 8px 10px;text-align:right;
-                         font-size:10px;color:{C['muted']};white-space:nowrap;
-                         border-bottom:1px solid {C['border']}">{credits_str}</td>
-            </tr>"""
+            </tr>'''
 
-                sess_rows += f"""
+                sess_rows += f'''
         <tr id="{sess_id}-tasks" style="display:none">
-          <td colspan="6" style="background:{C['subtle']};padding:10px 16px 6px;
+          <td colspan="4" style="background:{C['subtle']};padding:10px 16px 6px;
                                  border-bottom:1px solid {C['border']}">
             <table width="100%" cellpadding="0" cellspacing="0">
               {fr_html}
             </table>
           </td>
-        </tr>"""
+        </tr>'''
 
-        # ── Cross-session rollup: counts by kind across ALL sessions ──────────
-        # Quick "patterns I see across the whole period" line so readers don't
-        # lose the bird's-eye view when findings live inside session rows. We
-        # count every kind across every session, not just the top-5, so the
-        # rollup is informative even when most spend lives outside the top
-        # expensive sessions. Rendered as its own segment (with the standard dark
-        # banner) so it reads as a distinct cross-cutting view rather than a
-        # footer to the sessions table.
         from collections import Counter as _C
         kind_counts = _C(f.get("kind", "") for f in findings_all)
         n_total_sessions = max(1, len(sessions))
@@ -2335,23 +2115,23 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
                     f'<strong>{cnt}</strong> '
                     f'<span style="color:{C["muted"]}">{label.lower()}</span></span>'
                 )
-            rollup_html = f"""
+            rollup_html = f'''
       <table width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#24292f" style="background:linear-gradient(135deg,#24292f,#1b1f23);padding:10px 24px">
         <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
                     color:rgba(255,255,255,0.7)">Patterns across all {n_total_sessions} session{'s' if n_total_sessions != 1 else ''}</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          Cross-cutting cost-saving signals observed across the period</div>
+          Cross-cutting signals observed across the period</div>
       </td></tr></table>
       <div style="padding:14px 24px;line-height:1.9">
         {"".join(parts)}
-      </div>"""
+      </div>'''
 
-        sess_html = f"""
+        sess_html = f'''
       <table width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#24292f" style="background:linear-gradient(135deg,#24292f,#1b1f23);padding:10px 24px">
         <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-                    color:rgba(255,255,255,0.7)">Top {len(top_sessions)} most-expensive session{'s' if len(top_sessions) != 1 else ''}</div>
+                    color:rgba(255,255,255,0.7)">Top {len(top_sessions)} most-active session{'s' if len(top_sessions) != 1 else ''}</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          Click a row to see why it cost what it did</div>
+          Click a row to see patterns observed</div>
       </td></tr></table>
       <div style="padding:14px 24px">
       <table width="100%" cellpadding="0" cellspacing="0"
@@ -2365,37 +2145,28 @@ def _ai_investment_breakdown(goals: list, sessions: list, analysis: dict,
           <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
                      text-align:left;border-bottom:1px solid {C['border']}">Model</th>
           <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">Credits</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">Share</th>
-          <th style="padding:6px 8px;font-size:10px;color:{C['muted']};text-transform:uppercase;
-                     text-align:right;border-bottom:1px solid {C['border']}">~$ market</th>
+                     text-align:right;border-bottom:1px solid {C['border']}">Turns</th>
         </tr>
         {sess_rows}
       </table>
-      </div>"""
+      </div>'''
     else:
         sess_html = ""
         rollup_html = ""
 
-    return f"""
+    return f'''
   <tr>
     <td style="background:{C['card']};padding:0;
                border-left:1px solid {C['border']};border-right:1px solid {C['border']}">
       <table width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#24292f" style="background:linear-gradient(135deg,#24292f,#1b1f23);padding:10px 24px">
         <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-                    color:rgba(255,255,255,0.7)">AI Investment Breakdown</div>
-        <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          Where {_fmt_credits(total_credits)} credits went &middot; all figures are estimates from measured tokens &times; GitHub's published per-model rates</div>
+                    color:rgba(255,255,255,0.7)">Collaboration Insights</div>
       </td></tr></table>
-      {mix_html}
       {sess_html}
       {rollup_html}
     </td>
-  </tr>"""
+  </tr>'''
 
-
-# ── Where Your Credits Went (behaviour-grounded cost-saving findings) ────────
 
 # Catalogue is sourced from best_practices.py — each entry carries icon,
 # label, ranking weight, and the published source (Anthropic / OpenAI /
@@ -2422,40 +2193,18 @@ def _burn_finding_credits(f: dict) -> int:
     return _credits(usd)
 
 
-def _render_burn_findings_html(analysis: dict, C: dict,
+def _render_actionable_insights_html(analysis: dict, C: dict,
                                project_label_map: dict) -> str:
-    """Render the 'Where Your Credits Went' section.
-
-    Surfaces the top observed cost-saving opportunities sourced from
-    `analysis['burn_findings']`. Each finding is tied to a published
-    best-practice catalogued in `best_practices.BP_CATALOGUE`, so the
-    row shows its source attribution alongside the observed credits.
-    All credit numbers are computed from directly observed
-    assistant.message output tokens (no extrapolation). Language is
-    deliberately observational — "observed during", not "wasted on" —
-    because the time-window attribution is a slice, not causal evidence.
-    """
     findings = analysis.get("burn_findings") or []
     if not findings:
         return ""
 
-    # Score each finding by credits + small kind weight for tie-breaking.
     scored = []
     for f in findings:
-        cr = _burn_finding_credits(f)
         meta = _bp_meta(f.get("kind", ""))
-        scored.append((cr, meta.get("weight", 0), f))
-    # Sort by credits desc, then weight, then keep original order.
+        scored.append((0, meta.get("weight", 0), f))
     scored.sort(key=lambda x: (-x[0], -x[1]))
 
-    # Take top N, prefer at most 2 per kind so the list shows variety
-    # (a single hot session can otherwise produce 6 hot_file findings
-    # and crowd out other patterns the user might benefit from seeing).
-    # We split slots: 5 for credit-ranked findings plus reserved slots
-    # for flag-only kinds (compaction_storm, broad_search_repeat,
-    # subagent_missed, no_verification, model_thrash) so they always
-    # surface as behavioural signals even when their direct credit
-    # attribution is low.
     from collections import Counter
     per_kind = Counter()
     picked = []
@@ -2465,14 +2214,11 @@ def _render_burn_findings_html(analysis: dict, C: dict,
         if per_kind[kind] >= 2:
             continue
         per_kind[kind] += 1
-        picked.append((cr, f))
+        picked.append((0, f))
         seen_ids.add(id(f))
         if len(picked) >= 5:
             break
 
-    # Reserve up to 3 extra slots for flag-only kinds the user benefits
-    # from seeing — even if their observed credits are smaller than
-    # other patterns above.
     flag_only_kinds = (
         "compaction_storm", "broad_search_repeat", "subagent_missed",
         "no_verification", "model_thrash",
@@ -2487,12 +2233,9 @@ def _render_burn_findings_html(analysis: dict, C: dict,
         if per_kind[f.get("kind", "")] >= 2:
             continue
         per_kind[f.get("kind", "")] += 1
-        picked.append((cr, f))
+        picked.append((0, f))
         seen_ids.add(id(f))
 
-    # Fill any remaining slots from the credit-ranked list (skipping
-    # already-picked items). Skip kinds already represented twice so the
-    # tail of the list shows variety rather than another hot_file/fail_loop.
     for cr, w, f in scored:
         if len(picked) >= 9:
             break
@@ -2501,7 +2244,7 @@ def _render_burn_findings_html(analysis: dict, C: dict,
         if per_kind[f.get("kind", "")] >= 2:
             continue
         per_kind[f.get("kind", "")] += 1
-        picked.append((cr, f))
+        picked.append((0, f))
         seen_ids.add(id(f))
 
     if not picked:
@@ -2514,7 +2257,6 @@ def _render_burn_findings_html(analysis: dict, C: dict,
         label = meta.get("label", f.get("kind", ""))
         source = meta.get("source", "")
         source_url = meta.get("source_url", "")
-        # Project label normalisation so display matches the rest of the report
         raw_proj = f.get("project", "")
         proj = project_label_map.get(raw_proj, raw_proj) or raw_proj
         date = f.get("date", "")
@@ -2522,11 +2264,7 @@ def _render_burn_findings_html(analysis: dict, C: dict,
         detail = (f.get("detail", "") or "").strip()
         advice = (f.get("advice", "") or "").strip()
         model = f.get("model", "")
-        credits_str = (
-            f"{_fmt_credits(cr)} observed cred."
-            if cr > 0 else "no token cost"
-        )
-        # Build a compact byline: project · date · model (when present)
+
         byline_parts = [proj] if proj else []
         if date:
             byline_parts.append(date)
@@ -2534,7 +2272,6 @@ def _render_burn_findings_html(analysis: dict, C: dict,
             byline_parts.append(model)
         byline = " &middot; ".join(byline_parts)
 
-        # Source citation: clickable when we have a URL, plain text otherwise.
         source_html = ""
         if source:
             if source_url:
@@ -2546,7 +2283,7 @@ def _render_burn_findings_html(analysis: dict, C: dict,
             else:
                 source_html = source
 
-        rows_html += f"""
+        rows_html += f'''
         <tr>
           <td style="vertical-align:top;padding:10px 8px 10px 0;width:30px;font-size:18px">
             {icon}
@@ -2565,34 +2302,21 @@ def _render_burn_findings_html(analysis: dict, C: dict,
               <strong style="color:{C['text']}">Try next time:</strong> {advice}
             </div>
           </td>
-          <td style="vertical-align:top;padding:10px 0 10px 12px;text-align:right;
-                     font-size:11px;color:{C['muted']};white-space:nowrap;
-                     border-bottom:1px solid {C['border']}">
-            {credits_str}
-          </td>
-        </tr>"""
+        </tr>'''
 
-    return f"""
+    return f'''
       <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
                   color:{C['muted']};margin-top:18px;margin-bottom:4px">
-        Where Your Credits Went
+        Actionable Insights
       </div>
       <div style="font-size:10px;color:{C['muted']};margin-bottom:8px;line-height:1.5">
-        Observable patterns in your sessions that coincided with credit
-        spend, ranked by impact. Each finding is matched to a published
-        best-practice from Anthropic, OpenAI, or GitHub &mdash; click
-        the source link to read the underlying guidance. Credits shown
-        are output-token credits directly observed in the event log
-        during each pattern's window &mdash; not causal claims, just
-        signal. The "try next time" suggestions are pre-session or
-        in-session behaviours, not mid-session model switches.
+        Observable patterns in your sessions. Each finding is matched to a published
+        best-practice from Anthropic, OpenAI, or GitHub.
       </div>
       <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
         {rows_html}
-      </table>"""
+      </table>'''
 
-
-# ── Credit Drivers (what consumed credits & how to work better) ──────────────
 
 # Map model name (longest-prefix matched) → recommended "next-tier-down"
 # model for downshift recommendations on lightweight sessions. The
@@ -2683,305 +2407,9 @@ def _classify_lang(path: str) -> str:
 
 
 def _credit_drivers(goals: list, sessions: list, analysis: dict) -> str:
-    """Show *what* consumed credits and turn it into actionable feedback.
-
-    Two sub-sections (skill split was removed — at session-level billing
-    granularity any per-skill split degenerates to equal arithmetic and
-    isn't honest signal):
-
-    A. **Credits by language** — session credits split proportionally
-       across the languages of files *modified* in that session. Approximate
-       (file-count weighted; we don't have per-file line attribution) but
-       grounded in real edits, not reads.
-    B. **Working patterns** — auto-generated insights from session-level
-       signals (iteration depth, no-commit sessions, reads-to-edits ratio,
-       long sessions, cache reuse). Each callout is a precise count or
-       ratio derived from harvested data.
-    """
-    total_credits = _ai_credits_for(analysis)
-    if total_credits <= 0:
-        return ""
-
-    # ── A. Credits by language ───────────────────────────────────────────
-    # Each session's credits get split proportionally across the language
-    # mix of files it modified.
-    lang_credits: dict = {}
-    for s in sessions:
-        sc = _ai_credits_for(s)
-        if sc <= 0:
-            continue
-        files = s.get("files_touched") or []
-        if not files:
-            lang_credits["No files modified"] = lang_credits.get("No files modified", 0) + sc
-            continue
-        counts: dict = {}
-        for f in files:
-            lang = _classify_lang(f)
-            counts[lang] = counts.get(lang, 0) + 1
-        n_total = sum(counts.values())
-        for lang, n in counts.items():
-            lang_credits[lang] = lang_credits.get(lang, 0) + sc * (n / n_total)
-    lang_rows = sorted(lang_credits.items(), key=lambda x: -x[1])[:6]
-
-    # ── B. Efficiency callouts ───────────────────────────────────────────
-    callouts: list = []
-
-    # 1. High iteration depth → "same files edited many times"
-    deep_iter = [s for s in sessions
-                 if (s.get("iteration_depth") or 0) >= 5 and _ai_credits_for(s) > 0]
-    if deep_iter:
-        deep_credits = sum(_ai_credits_for(s) for s in deep_iter)
-        callouts.append((
-            "warn",
-            f"{len(deep_iter)} session{'s' if len(deep_iter) != 1 else ''} edited the same files "
-            f"5+ times on average — {_fmt_credits(deep_credits)} credits "
-            f"({deep_credits / total_credits * 100:.0f}% of total). "
-            "Smaller, focused asks often land changes in fewer turns."
-        ))
-
-    # 2. No-commit exploration tax — sessions with credits but no git ops
-    no_commit = [s for s in sessions
-                 if _ai_credits_for(s) > 0 and not s.get("git_ops")]
-    if no_commit:
-        nc_credits = sum(_ai_credits_for(s) for s in no_commit)
-        nc_pct = nc_credits / total_credits * 100
-        if nc_pct >= 15:
-            callouts.append((
-                "info",
-                f"{nc_pct:.0f}% of credits ({_fmt_credits(nc_credits)}) went to "
-                f"{len(no_commit)} session{'s' if len(no_commit) != 1 else ''} with no commit or PR — "
-                "exploration / scaffolding work. Worth tracking if the trend grows."
-            ))
-
-    # 3. Read-heavy sessions — reads ≥ 4× edits
-    read_heavy = [s for s in sessions
-                  if (s.get("reads") or 0) >= 4 * max(s.get("edits") or 0, 1)
-                  and (s.get("reads") or 0) >= 10
-                  and _ai_credits_for(s) > 0]
-    if read_heavy:
-        rh_credits = sum(_ai_credits_for(s) for s in read_heavy)
-        if rh_credits / total_credits >= 0.15:
-            callouts.append((
-                "info",
-                f"{len(read_heavy)} session{'s' if len(read_heavy) != 1 else ''} were read-heavy "
-                f"(4×+ more reads than edits) — {_fmt_credits(rh_credits)} credits. "
-                "Indexing or summarising upfront can cut repeated context loads."
-            ))
-
-    # 4. Long sessions hog — top quartile by turns consumed disproportionate share
-    sess_with_credits = [s for s in sessions if _ai_credits_for(s) > 0]
-    if len(sess_with_credits) >= 4:
-        sorted_by_turns = sorted(sess_with_credits,
-                                 key=lambda s: -(s.get("substantive_turns")
-                                                 or s.get("conversation_turns") or 0))
-        top_q = sorted_by_turns[: max(1, len(sorted_by_turns) // 4)]
-        tq_credits = sum(_ai_credits_for(s) for s in top_q)
-        tq_pct = tq_credits / total_credits * 100
-        if tq_pct >= 60:
-            callouts.append((
-                "warn",
-                f"Top {len(top_q)} longest session{'s' if len(top_q) != 1 else ''} consumed "
-                f"{tq_pct:.0f}% of credits ({_fmt_credits(tq_credits)}). "
-                "Breaking long agent runs into shorter, scoped tasks reduces context bloat."
-            ))
-
-    # 5. Cache-miss heuristic (CLI-only — VS Code doesn't expose cache tokens).
-    # Guard: only fire when there's evidence cache fields are populated
-    # (cache_creation > 0 means the provider IS writing to cache and we
-    # have visibility). Without that guard, every VS Code report would
-    # falsely claim "0% cache reuse".
-    agg_tokens = analysis.get("tokens", {}) or {}
-    if isinstance(agg_tokens, dict):
-        inp = agg_tokens.get("input", 0)
-        cache_r = agg_tokens.get("cache_read", 0)
-        cache_w = agg_tokens.get("cache_creation", 0)
-        if cache_w > 0 and inp + cache_r >= 50_000:
-            cache_pct = cache_r / (inp + cache_r) * 100 if (inp + cache_r) else 0
-            if cache_pct < 25:
-                callouts.append((
-                    "info",
-                    f"Cache reuse was {cache_pct:.0f}% — most prompts re-sent full context. "
-                    "Keeping prompts stable across turns lets the provider's prompt cache do more work."
-                ))
-
-    # 6. Lightweight sessions on heavy models — model-default recommendation.
-    # We don't recommend mid-session model switching (impractical); instead
-    # we surface the *class* of sessions for which the user could pick a
-    # cheaper default model at session start (or rely on auto-model
-    # selection which captures this automatically). Only fires when the
-    # estimated saving is material — small days won't trigger noise.
-    lw_savings: dict = {}  # (current_model → savings) for grouping
-    lw_count = 0
-    lw_current_credits = 0.0
-    for s in sessions:
-        if not _is_lightweight_session(s):
-            continue
-        sc = _ai_credits_for(s)
-        if sc <= 0:
-            continue
-        model = s.get("model_used", "") or ""
-        if model.lower() in _INCLUDED_MODELS:
-            continue  # already free
-        target = _downshift_model(model)
-        if not target:
-            continue
-        tbm = s.get("tokens_by_model") or {}
-        # If the session is single-model (typical for chat), recompute the
-        # cost under the downshift target. If it's mixed, we still apply
-        # the downshift only to the matching model's tokens.
-        recomputed = 0.0
-        for mdl, toks in tbm.items():
-            if mdl == model:
-                t = _get_model_pricing(target)
-                recomputed += (
-                    toks.get("input", 0)          * t["input"]
-                  + toks.get("output", 0)         * t["output"]
-                  + toks.get("cache_read", 0)     * t["cache_read"]
-                  + toks.get("cache_creation", 0) * t["cache_creation"]
-                ) / 1_000_000
-            else:
-                # Leave other models in the session untouched
-                recomputed += _cost_by_model({mdl: toks},
-                                             auto_model=bool(s.get("auto_model_selection")))
-        savings_credits = max(0, _credits(_resolve_market_cost(s) - recomputed))
-        if savings_credits <= 0:
-            continue
-        lw_count += 1
-        lw_current_credits += sc
-        key = (model, target)
-        lw_savings[key] = lw_savings.get(key, 0) + savings_credits
-
-    if lw_savings:
-        total_save = sum(lw_savings.values())
-        # Only emit if the saving is meaningful relative to total spend
-        if total_save / total_credits >= 0.05 or total_save >= 500:
-            # Build a "from → to" hint listing the dominant downshift pair
-            top_pair = max(lw_savings.items(), key=lambda x: x[1])
-            from_m, to_m = top_pair[0]
-            callouts.append((
-                "warn",
-                f"{lw_count} lightweight session{'s' if lw_count != 1 else ''} "
-                f"(short output, few tools, ≤1 file edited) ran on a top-tier model "
-                f"— ~{_fmt_credits(lw_current_credits)} spent, "
-                f"~{_fmt_credits(total_save)} savings estimated if defaulted to a smaller model "
-                f"(e.g. {from_m} → {to_m}). "
-                "Set a cheaper default for Q&amp;A sessions, or enable auto-model selection."
-            ))
-
-    # 7. Auto-model selection off — flat 10% nudge.
-    # If the user hasn't enabled auto-model selection and there's any
-    # credit spend on non-included models, the 10% discount is a free win
-    # with no behaviour change required.
-    auto_on = bool(analysis.get("auto_model_selection") or analysis.get("auto_model"))
-    if not auto_on:
-        # Estimate the 10% savings on the portion of credits NOT already
-        # on included (free) models. We can't perfectly attribute included
-        # vs non-included from the aggregate, but we can use the tokens_by_model
-        # breakdown to be precise.
-        non_inc_credits = 0
-        tbm = analysis.get("tokens_by_model") or {}
-        for mdl, toks in tbm.items():
-            if mdl.lower() in _INCLUDED_MODELS:
-                continue
-            non_inc_credits += _credits(_cost_by_model({mdl: toks}, auto_model=False))
-        auto_savings = int(round(non_inc_credits * AUTO_MODEL_DISCOUNT))
-        if auto_savings >= 100:  # only nudge when material
-            callouts.append((
-                "info",
-                f"Auto-model selection appears to be off. Enabling it would apply a "
-                f"flat 10% discount on paid-plan model usage — estimated "
-                f"~{_fmt_credits(auto_savings)} credits saved this period, with no change "
-                "to how you start sessions."
-            ))
-
-    # ── Render ───────────────────────────────────────────────────────────
-    def _bar_table(rows: list[tuple], unit: str) -> str:
-        if not rows:
-            return f'<div style="font-size:11px;color:{C["muted"]};margin:6px 0">No data.</div>'
-        max_c = max(c for _, c in rows) or 1
-        out = ""
-        for label, credits in rows:
-            pct_total = credits / total_credits * 100
-            bar_w = max(2, int(credits / max_c * 100))
-            out += f"""
-        <tr>
-          <td style="padding:6px 8px;font-size:11px;color:{C['text']};
-                     border-bottom:1px solid {C['border']};width:32%">{label}</td>
-          <td style="padding:6px 8px;border-bottom:1px solid {C['border']}">
-            <table cellpadding="0" cellspacing="0" style="width:100%">
-              <tr>
-                <td style="width:{bar_w}%;background:{C['accent']};height:6px"></td>
-                <td style="background:{C['border']};height:6px"></td>
-              </tr>
-            </table>
-          </td>
-          <td style="padding:6px 8px;font-size:11px;color:{C['text']};text-align:right;
-                     border-bottom:1px solid {C['border']};width:14%">{_fmt_credits(int(round(credits)))}</td>
-          <td style="padding:6px 8px;font-size:11px;color:{C['muted']};text-align:right;
-                     border-bottom:1px solid {C['border']};width:10%">{pct_total:.0f}%</td>
-        </tr>"""
-        return f"""
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="border-collapse:collapse;background:{C['bg']};
-                    border:1px solid {C['border']}">
-        {out}
-      </table>"""
-
-    skill_html = ""
-
-    lang_html = f"""
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
-                  color:{C['muted']};margin-top:6px;margin-bottom:6px">
-        Credits by language <span style="font-weight:400;text-transform:none;letter-spacing:0;color:{C['muted']}">
-          — proportional to files modified per session</span></div>
-      {_bar_table(lang_rows, 'credits')}""" if lang_rows else ""
-
-    if callouts:
-        bullet_rows = ""
-        for kind, text in callouts:
-            icon = "&#9888;" if kind == "warn" else "&#128161;"  # ⚠ or 💡
-            color = C["text"] if kind == "warn" else C["muted"]
-            bullet_rows += f"""
-        <tr>
-          <td style="padding:6px 8px;font-size:13px;color:{C['accent']};
-                     vertical-align:top;width:22px">{icon}</td>
-          <td style="padding:6px 8px;font-size:11px;color:{color};line-height:1.5">{text}</td>
-        </tr>"""
-        callout_html = f"""
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
-                  color:{C['muted']};margin-top:18px;margin-bottom:6px">
-        Working patterns to watch <span style="font-weight:400;text-transform:none;letter-spacing:0;color:{C['muted']}">
-          — auto-detected from session signals</span></div>
-      <table width="100%" cellpadding="0" cellspacing="0"
-             style="background:{C['bg']};border:1px solid {C['border']}">
-        {bullet_rows}
-      </table>"""
-    else:
-        callout_html = f"""
-      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
-                  color:{C['muted']};margin-top:18px;margin-bottom:6px">Working patterns to watch</div>
-      <div style="font-size:11px;color:{C['muted']};padding:8px 4px">
-        No notable patterns detected — sessions look balanced.</div>"""
-
-    return f"""
-  <tr>
-    <td style="background:{C['card']};padding:14px 24px;
-               border-left:1px solid {C['border']};border-right:1px solid {C['border']}">
-      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
-                  color:{C['text']};margin-bottom:4px">Credit Drivers</div>
-      <div style="font-size:11px;color:{C['muted']};margin-bottom:8px">
-        What consumed credits and patterns to consider for next time.
-        Language split is <em>approximate</em> (weighted by file count, not
-        per-message billing). Working-pattern callouts are exact counts and
-        ratios from harvested session signals.</div>
-      {skill_html}
-      {lang_html}
-      {callout_html}
-    </td>
-  </tr>"""
+    return ""
 
 
-def _activity_bar(analysis: dict) -> str:
     """Show pricing comparison (fixed vs market), AI credits, token breakdown."""
     tokens       = analysis.get("tokens", {})
     premium_req  = analysis.get("premium_requests", 0)
@@ -3167,14 +2595,7 @@ def _goals_summary(goals: list, session_lookup: dict = None, session_metrics: di
         # Always show a credits cell — empty looks broken. Render "0"
         # explicitly when a goal really cost nothing (e.g., all included
         # models or no token data harvested for that project).
-        credits_html  = _fmt_credits(goal_credits) if goal_credits > 0 else "0"
-        credits_color = C['green'] if goal_credits > 0 else C['muted']
-        credits_cell  = f"""
-          <td style="padding:10px 8px;border-bottom:1px solid {C['border']};
-                     vertical-align:middle;text-align:right;width:10%">
-            <div style="font-size:14px;font-weight:700;color:{credits_color}">{credits_html}</div>
-            <div style="font-size:10px;color:{C['muted']};margin-top:1px">credits</div>
-          </td>"""
+        credits_cell = ""
         return f"""
         <tr id="{gid}-hdr" style="background:{bg};cursor:pointer"
             onclick="toggleDetail('{gid}')">
@@ -3198,7 +2619,6 @@ def _goals_summary(goals: list, session_lookup: dict = None, session_metrics: di
             <div>{skill_pills}</div>
             <div style="font-size:10px;color:{C['muted']};margin-top:5px">{task_sub}</div>
           </td>
-          {credits_cell}
           <td style="padding:10px 8px;border-bottom:1px solid {C['border']};
                      vertical-align:middle;text-align:right;width:12%">
             <div style="font-size:16px;font-weight:700;color:{C['accent']}">{h}</div>
@@ -3410,7 +2830,7 @@ def generate_html(target_date: str, analysis: dict, sessions: list,
     # Sort goals once by hours descending so all sections are consistent
     goals      = sorted(goals, key=lambda g: g.get("human_hours", 0), reverse=True)
     narrative  = analysis.get("day_narrative", "")
-    headline   = analysis.get("headline", f"Daily Report — {target_date}")
+    headline   = f"Jira Task Analyzer: {target_date}"
     focus      = analysis.get("primary_focus", "")
     n_sessions = analysis.get("sessions_count", len(sessions))
     projects   = sorted({s["project"] for s in sessions})
@@ -3430,10 +2850,6 @@ def generate_html(target_date: str, analysis: dict, sessions: list,
             {len(goals)} project{'s' if len(goals) != 1 else ''} &nbsp;·&nbsp; {total_tasks} tasks total
           </td>
           <td style="padding:10px 16px;border-top:2px solid {C['border']}"></td>
-          <td style="padding:10px 16px;border-top:2px solid {C['border']};
-                     text-align:right;font-size:14px;font-weight:700;color:{C['green']}">
-            {total_cred_fmt}
-          </td>
           <td style="padding:10px 16px;border-top:2px solid {C['border']};
                      text-align:right;font-size:18px;font-weight:700;color:{C['accent']}">
             {_fmt_h(total_human_h)}
@@ -3594,7 +3010,7 @@ window.onload = function() {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>What I Did (Copilot) — {target_date}</title>
+<title>Jira Task Analyzer — {target_date}</title>
 <style>
   /* Browser-friendly responsive overrides */
   body {{ -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }}
@@ -3631,7 +3047,7 @@ window.onload = function() {
       <td valign="top">
       <div style="font-size:10px;color:rgba(255,255,255,0.6);letter-spacing:1.2px;
                   text-transform:uppercase;margin-bottom:4px">
-        {target_date} &nbsp;·&nbsp; GitHub Copilot Impact Report
+        {target_date} &nbsp;·&nbsp; Jira Task Analyzer Report
       </div>
       <div style="font-size:20px;font-weight:700;color:#fff;line-height:1.3"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" style="vertical-align:middle;margin-right:10px"><path fill="white" d="M23.922 16.992c-.861 1.495-5.859 5.023-11.922 5.023-6.063 0-11.061-3.528-11.922-5.023A.641.641 0 0 1 0 16.736v-2.869a.841.841 0 0 1 .053-.22c.372-.935 1.347-2.292 2.605-2.656.167-.429.414-1.055.644-1.517a10.195 10.195 0 0 1-.052-1.086c0-1.331.282-2.499 1.132-3.368.397-.406.89-.717 1.474-.952 1.399-1.136 3.392-2.093 6.122-2.093 2.731 0 4.767.957 6.166 2.093.584.235 1.077.546 1.474.952.85.869 1.132 2.037 1.132 3.368 0 .368-.014.733-.052 1.086.23.462.477 1.088.644 1.517 1.258.364 2.233 1.721 2.605 2.656a.832.832 0 0 1 .053.22v2.869a.641.641 0 0 1-.078.256ZM12.172 11h-.344a4.323 4.323 0 0 1-.355.508C10.703 12.455 9.555 13 7.965 13c-1.725 0-2.989-.359-3.782-1.259a2.005 2.005 0 0 1-.085-.104L4 11.741v6.585c1.435.779 4.514 2.179 8 2.179 3.486 0 6.565-1.4 8-2.179v-6.585l-.098-.104s-.033.045-.085.104c-.793.9-2.057 1.259-3.782 1.259-1.59 0-2.738-.545-3.508-1.492a4.323 4.323 0 0 1-.355-.508h-.016.016Zm.641-2.935c.136 1.057.403 1.913.878 2.497.442.544 1.134.938 2.344.938 1.573 0 2.292-.337 2.657-.751.384-.435.558-1.15.558-2.361 0-1.14-.243-1.847-.705-2.319-.477-.488-1.319-.862-2.824-1.025-1.487-.161-2.192.138-2.533.529-.269.307-.437.808-.438 1.578v.021c0 .265.021.562.063.893Zm-1.626 0c.042-.331.063-.628.063-.894v-.02c-.001-.77-.169-1.271-.438-1.578-.341-.391-1.046-.69-2.533-.529-1.505.163-2.347.537-2.824 1.025-.462.472-.705 1.179-.705 2.319 0 1.211.175 1.926.558 2.361.365.414 1.084.751 2.657.751 1.21 0 1.902-.394 2.344-.938.475-.584.742-1.44.878-2.497Z"/><path fill="white" d="M14.5 14.25a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Zm-5 0a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0v-2a1 1 0 0 1 1-1Z"/></svg>{headline}</div>
       </td>
@@ -3679,18 +3095,7 @@ window.onload = function() {
           Detailed project breakdown with task-level evidence</div>
       </td></tr></table>
       <div style="padding:14px 24px 16px">
-      <div style="font-size:10px;color:{C['muted']};margin-bottom:10px;line-height:1.5">
-        <strong style="color:{C['text']}">Credits</strong> = the unit GitHub now bills in
-        (1 credit = $0.01). Each request consumes credits at a model-specific rate
-        (e.g. Claude Opus is ~30× more credit-intensive per token than GPT-4.1).
-        Tokens are the underlying input/output units the model processed; credits =
-        tokens &times; per-model rate. A project showing
-        <strong style="color:{C['muted']}">0 credits</strong> means one of:
-        (a) it ran entirely on included models (GPT-4.1, GPT-4.1 mini — no credit
-        charge), (b) the session log didn't expose any token data (older VS Code
-        sessions, or sessions killed before any assistant message), or
-        (c) only completions (free, unlimited) were used.{_open_session_note(analysis)}
-      </div>
+
       <table width="100%" cellpadding="0" cellspacing="0"
              style="border:1px solid {C['border']};border-radius:7px;overflow:hidden">
         {_goals_summary(goals, session_lookup, analysis.get("session_metrics", {}))}
@@ -3715,10 +3120,10 @@ window.onload = function() {
   <!-- 4. WHEN I WORKED WITH COPILOT -->
   {_work_pattern(sessions)}
 
-  <!-- 5. AI INVESTMENT (credits, model mix, top sessions, where credits went) -->
-  {_ai_investment_breakdown(goals, sessions, analysis, total_prs, project_label_map)}
+  <!-- 5. COLLABORATION INSIGHTS -->
+  {_collaboration_insights(goals, sessions, analysis, total_prs, project_label_map)}
 
-  <!-- 6. ESTIMATION EVIDENCE (collapsible) -->
+
   <tr>
     <td style="background:{C['card']};padding:0 24px 12px;
                border-left:1px solid {C['border']};border-right:1px solid {C['border']}">
@@ -3726,7 +3131,7 @@ window.onload = function() {
            onclick="toggleDetail('evidence')">
         <span id="evidence-arrow" style="font-size:10px;color:{C['accent']};margin-right:5px">&#9654;</span>
         <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
-                     color:{C['muted']}">Estimation Evidence &mdash; how these numbers were calculated</span>
+                     color:{C['muted']}">Effort Evidence &mdash; how these numbers were calculated</span>
       </div>
       <div id="evidence-tasks" style="display:none">
         {_estimation_waterfall_inner(goals, analysis)}
@@ -3740,7 +3145,7 @@ window.onload = function() {
     <td bgcolor="#1f2328" style="background:{C['text']};border-radius:0 0 9px 9px;padding:16px 24px;
                text-align:center">
       <div style="font-size:13px;font-weight:700;color:#ffffff;margin-bottom:4px">
-        Want your own GitHub Copilot Impact Report?
+        Generated by Jira Task Analyzer
       </div>
       <div style="font-size:11px;color:rgba(255,255,255,0.55);margin-bottom:8px">
         One command. Every session. A complete story of your AI-assisted work.
@@ -3752,7 +3157,7 @@ window.onload = function() {
         &#128279; github.com/microsoft/What-I-Did-Copilot
       </a>
       <div style="font-size:10px;color:rgba(255,255,255,0.25);margin-top:10px">
-        {target_date} &nbsp;·&nbsp; GitHub Copilot Impact Report
+        {target_date} &nbsp;·&nbsp; Jira Task Analyzer Report
       </div>
       <div style="font-size:11px;color:rgba(255,255,255,0.45);margin-top:10px">
         ⭐ If you found this useful, consider <a href="https://github.com/microsoft/What-I-Did-Copilot" style="color:rgba(255,255,255,0.7);text-decoration:none;font-weight:600">starring the repo</a> to help others discover it
