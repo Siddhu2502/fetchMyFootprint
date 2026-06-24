@@ -1197,6 +1197,208 @@ def get_sessions_for_date(target_date: str) -> list:
 
 # ── VS Code Session Harvesting ───────────────────────────────────────────────
 
+
+
+def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
+    """
+    Find all Copilot sessions that contain the given ticket in user messages.
+    Optionally filter by a list of target dates (YYYY-MM-DD).
+    """
+    sessions = []
+    ticket_lower = ticket.lower()
+
+    # We need to scan all dates or a specific set of dates.
+    # Since VS Code and CLI logs aren't easily indexed by date globally without scanning,
+    # we will rely on reading all logs if date_filter is None.
+    # To avoid rewriting the entire harvesting logic, we will scan all chat directories
+    # for JSONL files, and only fully parse those that contain the ticket string.
+
+    # ── CLI sessions ────────────────────────────────────────────────────
+    if SESSION_DIR.exists():
+        for session_dir in SESSION_DIR.iterdir():
+            if not session_dir.is_dir():
+                continue
+
+            events_file    = session_dir / "events.jsonl"
+            workspace_file = session_dir / "workspace.yaml"
+
+            if not events_file.exists():
+                continue
+
+            # Fast pre-filter
+            try:
+                content = events_file.read_text(encoding="utf-8").lower()
+                if ticket_lower not in content:
+                    continue
+            except Exception:
+                continue
+
+            workspace = _read_workspace(workspace_file)
+            events = _read_jsonl_events(events_file)
+            if not events:
+                continue
+
+            # Group events by date to reuse _build_session_from_events
+            events_by_date = {}
+            for e in events:
+                ts = e.get("timestamp", "")
+                if ts:
+                    d = ts[:10]
+                    if date_filter and d not in date_filter:
+                        continue
+                    events_by_date.setdefault(d, []).append(e)
+
+            for d, day_events in events_by_date.items():
+                session = _build_session_from_events(
+                    day_events, d,
+                    session_id=session_dir.name,
+                    source_path=session_dir,
+                    cwd_default=workspace.get("cwd", ""),
+                    repository_default=workspace.get("repository", ""),
+                    branch_default=workspace.get("branch", ""),
+                    workspace_summary=workspace.get("summary", ""),
+                    entrypoint="copilot",
+                )
+                if session is not None:
+                    # Final check: does the session have the ticket in user messages?
+                    has_ticket = any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
+                    if has_ticket:
+                        sessions.append(session)
+
+    # ── VS Code chatSessions & transcripts ──────────────────────────────
+    # For VS Code, we'll scan chat directories similar to get_vscode_sessions_for_date
+    chat_dirs = _get_vscode_chat_dirs()
+    if chat_dirs:
+        for chat_dir, cwd_hint, workspace_key in chat_dirs:
+            for jsonl_file in chat_dir.glob("*.jsonl"):
+                # Fast pre-filter
+                try:
+                    with open(jsonl_file, "r", encoding="utf-8") as f:
+                        content = f.read().lower()
+                        if ticket_lower not in content:
+                            continue
+                except Exception:
+                    continue
+
+                creation_ms, hv, lines = _load_vscode_chat_file_lines(jsonl_file)
+                if not creation_ms or lines is None:
+                    continue
+
+                # Determine dates present in this file
+                dates_in_file = set()
+                for obj in lines:
+                    if obj.get("kind") == 2:
+                        for item in obj.get("v", []):
+                            if isinstance(item, dict) and "timestamp" in item:
+                                ts_ms = item.get("timestamp", 0)
+                                if ts_ms:
+                                    ts_iso = _vscode_epoch_to_iso(ts_ms)
+                                    if ts_iso:
+                                        dates_in_file.add(ts_iso[:10])
+
+                for d in dates_in_file:
+                    if date_filter and d not in date_filter:
+                        continue
+                    session = _parse_vscode_chat_file(jsonl_file, d, cwd_hint)
+                    if session is not None:
+                        has_ticket = any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
+                        if has_ticket:
+                            session["_vskey"] = (workspace_key, jsonl_file.stem)
+                            sessions.append(session)
+
+    # Note: VS Code Transcripts (GitHub.copilot-chat/transcripts)
+    # We will do a similar scan for transcripts to ensure we don't miss data
+    for base in _vscode_user_dirs():
+        ws_root = base / "workspaceStorage"
+        if not ws_root.is_dir():
+            continue
+        try:
+            ws_entries = list(ws_root.iterdir())
+        except OSError:
+            continue
+        for ws_dir in ws_entries:
+            if not ws_dir.is_dir():
+                continue
+            tx_dir = ws_dir / "GitHub.copilot-chat" / "transcripts"
+            if not tx_dir.is_dir():
+                continue
+            cwd_hint = _vscode_workspace_cwd(ws_dir / "workspace.json")
+            for jsonl_file in tx_dir.glob("*.jsonl"):
+                # Fast pre-filter
+                try:
+                    with open(jsonl_file, "r", encoding="utf-8") as f:
+                        content = f.read().lower()
+                        if ticket_lower not in content:
+                            continue
+                except Exception:
+                    continue
+
+                # Load buckets
+                entry = _load_transcript_buckets(jsonl_file)
+                for d, day_events in entry.get("buckets", {}).items():
+                    if date_filter and d not in date_filter:
+                        continue
+                    ss = entry.get("session_start")
+                    events = [ss] + day_events if ss else day_events
+                    session = _build_session_from_events(
+                        events, d,
+                        session_id=jsonl_file.stem,
+                        source_path=jsonl_file,
+                        cwd_default=cwd_hint,
+                        entrypoint="vscode",
+                    )
+                    if session is not None:
+                        has_ticket = any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
+                        if has_ticket:
+                            # Avoid double counting if chatSessions already has it
+                            # We can merge them similar to `get_sessions_for_date`
+                            session["_vskey"] = (ws_dir.name, jsonl_file.stem)
+                            # Let's just append it, we will deduplicate below
+                            sessions.append(session)
+
+    # Deduplicate and merge transcripts + chatSessions
+    final_sessions = []
+    vskeys_seen = set()
+
+    # We want to merge tokens from chatSessions into transcripts like the original does
+    chat_sessions = [s for s in sessions if s.get("_vskey") and s.get("tokens")]
+    transcript_sessions = [s for s in sessions if s.get("_vskey") and not s.get("tokens")]
+
+    chat_by_key_date = {(s["_vskey"], s["date"]): s for s in chat_sessions}
+
+    for s in transcript_sessions:
+        key_date = (s["_vskey"], s["date"])
+        src = chat_by_key_date.get(key_date)
+        if src and src.get("tokens", {}).get("total"):
+            s["tokens"]            = src["tokens"]
+            s["tokens_by_model"]   = src["tokens_by_model"]
+            s["requests_by_model"] = src["requests_by_model"]
+            s["premium_requests"]  = src.get("premium_requests", 0)
+            if src.get("inline_model_pricing"):
+                s["inline_model_pricing"] = src["inline_model_pricing"]
+            if not s.get("total_api_ms"):
+                s["total_api_ms"] = src.get("total_api_ms", 0)
+            vskeys_seen.add(key_date)
+        final_sessions.append(s)
+
+    for key_date, cs in chat_by_key_date.items():
+        if key_date not in vskeys_seen:
+            final_sessions.append(cs)
+
+    # Add CLI sessions
+    final_sessions.extend([s for s in sessions if not s.get("_vskey")])
+
+    for s in final_sessions:
+        s.pop("_vskey", None)
+
+    # Clean up burn findings token details
+    for s in final_sessions:
+        for b in s.get("burn_findings", []):
+            b["output_tokens"] = 0
+            b["detail"] = "Burn pattern detected."
+
+    return final_sessions
+
 def _vscode_user_dirs() -> "list[Path]":
     """Cross-platform list of VS Code per-user directories (just 'Code' for now)."""
     if _sys.platform == "win32":

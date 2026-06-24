@@ -790,12 +790,14 @@ def _preprocess_argv(argv: list) -> list:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate a digest of what GitHub Copilot helped you accomplish."
+        description="Generate a digest of what GitHub Copilot helped you accomplish for a specific Jira ticket."
     )
-    parser.add_argument("--date",    default="7D",
-                        help="Single date or lookback: YYYY-MM-DD, MM-DD-YYYY, 7D, 30D, 'today' (default: 7D)")
+    parser.add_argument("--ticket",  required=True,
+                        help="Jira ticket number (e.g., BBX-5828) to filter sessions.")
+    parser.add_argument("--date",    default=None,
+                        help="Single date or lookback: YYYY-MM-DD, MM-DD-YYYY, 7D, 30D, 'today' (optional filter)")
     parser.add_argument("--from",    dest="date_from", default=None,
-                        help="Start of date range (any format)")
+                        help="Start of date range (any format, optional filter)")
     parser.add_argument("--to",      dest="date_to",   default=None,
                         help="End of date range (any format, default: today)")
     parser.add_argument("--refresh", action="store_true",
@@ -805,30 +807,33 @@ def main():
     parser.add_argument("--email",   nargs="?", const=True, default=False,
                         help="Send report via Outlook (auto-detects email, or pass an explicit address)")
     parser.add_argument("--non-interactive", dest="non_interactive", action="store_true",
-                        help="Never prompt for input; on AI-analysis failure, fall straight back to the "
-                             "heuristic estimate. Used when launched from the VS Code extension.")
+                        help="Never prompt for input; on AI-analysis failure, fall straight back to the heuristic estimate. Used when launched from the VS Code extension.")
     parser.add_argument("--out-dir", dest="out_dir", default=None,
                         help="Directory to save the HTML report (default: the folder containing this script)")
-    args = parser.parse_args(_preprocess_argv(sys.argv[1:]))
 
+
+    args = parser.parse_args(_preprocess_argv(sys.argv[1:]))
     today = date.today().isoformat()
 
     if args.date_from:
         from_date = _parse_date(args.date_from)
         to_date   = _parse_date(args.date_to) if args.date_to else today
         dates        = _date_range(from_date, to_date)
-        report_label = f"{from_date}_to_{to_date}"
-    elif _LOOKBACK_RE.match(args.date.strip()):
+        report_label = f"{args.ticket}_{from_date}_to_{to_date}"
+    elif args.date and _LOOKBACK_RE.match(args.date.strip()):
         # Lookback shortcut: 7D, 30D, etc. → date range
         from_date    = _parse_date(args.date)
         dates        = _date_range(from_date, today)
-        report_label = f"{from_date}_to_{today}"
-    else:
+        report_label = f"{args.ticket}_{from_date}_to_today"
+    elif args.date:
         target       = _parse_date(args.date)
         dates        = [target]
-        report_label = target
+        report_label = f"{args.ticket}_{target}"
+    else:
+        dates        = None
+        report_label = args.ticket
 
-    from harvest import get_sessions_for_date
+
     from analyze import analyze_day, check_api_health
 
     print(f"\nwhatididghcp -- {report_label}")
@@ -838,6 +843,7 @@ def main():
     # Chain: GitHub Models API → Copilot CLI → heuristic. We only force
     # heuristic if BOTH options are unavailable.
     import time
+    from harvest import get_sessions_for_ticket
     from analyze import check_copilot_cli_health
     MAX_RETRIES = 5
     RETRY_WAIT  = 60  # 1 minute
@@ -926,19 +932,34 @@ def main():
 
     from report import _resolve_market_cost as _rmc, _credits as _cred
 
-    # Phase 1 — harvest each day sequentially (cheap, file I/O) and print the
-    # per-day line in date order, byte-for-byte identical to the original loop.
     pending = []  # [(date, sessions)] for non-empty days, in date order
-    for d in dates:
-        sessions = get_sessions_for_date(d)
-        if not sessions:
-            continue
+
+    # Fetch sessions for the ticket
+    all_ticket_sessions = get_sessions_for_ticket(args.ticket, date_filter=dates)
+
+    # Print out user chats to stdout as requested
+    print(f"\n--- EXTRACTED USER CHATS FOR {args.ticket} ---")
+    for s in all_ticket_sessions:
+        for m in s.get("messages", []):
+            if m.get("role") == "user":
+                print(f"[{s.get('date', 'Unknown Date')}] {m.get('text', '')}")
+    print("-------------------------------------------\n")
+
+    # Group sessions by date
+    sessions_by_date = {}
+    for s in all_ticket_sessions:
+        d = s.get("date")
+        if d:
+            sessions_by_date.setdefault(d, []).append(s)
+
+    # Keep date ordering
+    ordered_dates = sorted(sessions_by_date.keys())
+    for d in ordered_dates:
+        sessions = sessions_by_date[d]
         premium = sum(s.get("premium_requests", 0) for s in sessions)
-        # Compute per-day AI credit total from tokens (server credits aren't
-        # always present yet; this matches what the report uses).
         day_credits = sum(_cred(_rmc(s)) for s in sessions)
         leg = f", {premium} legacy reqs" if premium else ""
-        print(f"  {d}: {len(sessions)} session(s), {day_credits:,} AI credits{leg}")
+        print(f"  {d}: {len(sessions)} session(s) for {args.ticket}")
         pending.append((d, sessions))
         all_sessions.extend(sessions)
 
