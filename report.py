@@ -785,7 +785,7 @@ def _work_pattern(sessions: list) -> str:
         <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
                     color:rgba(255,255,255,0.7)">When I Worked</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          When Copilot-assisted work happened during the day</div>
+          When my AI-assisted work happened during the day</div>
       </td></tr></table>
       <div style="padding:14px 24px 18px">
       <table width="100%" cellpadding="0" cellspacing="0">
@@ -861,7 +861,7 @@ def _collaboration_intent(sessions: list, project_label_map: dict = None) -> str
                 f"&mdash; {hv_list}.")
     sub_parts = []
     if delegating_pct > 0:
-        sub_parts.append(f"Copilot automated {delegating_pct}% of routine tasks")
+        sub_parts.append(f"I utilized AI to automate {delegating_pct}% of routine tasks")
     if course_pct > 0:
         sub_parts.append(f"{course_pct}% was spent course-correcting AI output")
     subtitle = " &middot; ".join(sub_parts) if sub_parts else ""
@@ -1026,7 +1026,7 @@ def _collaboration_intent(sessions: list, project_label_map: dict = None) -> str
         <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;
                     color:rgba(255,255,255,0.7)">How I Collaborated</div>
         <div style="font-size:11px;color:rgba(255,255,255,0.5);margin-top:2px">
-          The different types of work Copilot handled for you</div>
+          The different types of work I utilized AI to accomplish</div>
       </td></tr></table>
       <div style="padding:16px 24px 18px">
         <div style="font-size:14px;font-weight:700;color:{C['text']};margin-bottom:4px;line-height:1.4">
@@ -1159,9 +1159,9 @@ def _skills_mobilized(goals: list) -> str:
       <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;
                   color:{C['muted']};margin-bottom:6px">SKILLS AUGMENTED</div>
       <div style="font-size:14px;font-weight:700;color:{C['text']};margin-bottom:4px;line-height:1.4">
-        This is the team GitHub Copilot assembled for me &mdash; on demand, at zero headcount cost.</div>
+        These are the professional disciplines I utilized to get the job done &mdash; acting as a multiplier on my own skills.</div>
       <div style="font-size:11px;color:{C['muted']};margin-bottom:14px">
-        {_fmt_h(total_hours)} of expert-level assistance across {n_roles} professional disciplines &middot; {total_tasks} tasks delivered</div>
+        {_fmt_h(total_hours)} of collaborative effort across {n_roles} professional disciplines &middot; {total_tasks} tasks delivered</div>
       <table width="100%" cellpadding="0" cellspacing="0">
         {rows}
       </table>
@@ -3110,8 +3110,6 @@ window.onload = function() {
   </tr>
 
   <!-- 2. WHAT GOT PRODUCED (deliverables + skills) -->
-  {_what_i_work_on(goals, sessions, project_label_map)}
-
   {_skills_mobilized(goals)}
 
   <!-- 3. HOW I WORKED WITH COPILOT (intent) -->

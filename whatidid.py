@@ -462,10 +462,10 @@ def _merge_analyses(day_analyses: list) -> dict:
         d1 = active_dates[-1][5:]
         n  = len(all_goals)
         headline  = (f"{len(active_dates)} active days ({d0} – {d1}): "
-                     f"{n} project{'s' if n != 1 else ''} delivered")
+                     f"{n} Jira ticket{'s' if n != 1 else ''} delivered")
         narrative = (f"Across {len(active_dates)} active days from "
                      f"{active_dates[0]} to {active_dates[-1]}, Copilot assisted with "
-                     f"{n} distinct project{'s' if n != 1 else ''} across "
+                     f"{n} distinct Jira ticket{'s' if n != 1 else ''} across "
                      f"{len(all_projects)} workspace{'s' if len(all_projects) != 1 else ''}. "
                      f"Related work across days has been grouped.")
 
@@ -633,10 +633,10 @@ def _build_email_summary_html(analysis: dict, report_label: str) -> str:
 
     esc = _html.escape
 
-    # Project rows
+    # Jira Ticket rows
     rows = ""
     for i, g in enumerate(goals):
-        title   = esc((g.get("title") or g.get("label") or "Project").strip())
+        title   = esc((g.get("title") or g.get("label") or "Jira Ticket").strip())
         summary = esc((g.get("summary") or "").strip())
         hours   = float(g.get("human_hours") or 0)
         hours_s = (f"{hours:.1f}h" if hours else "")
@@ -691,7 +691,7 @@ def _build_email_summary_html(analysis: dict, report_label: str) -> str:
         ${value:,.0f}</div>
       <div style="font-size:12px;color:#d8efd8;margin-top:3px">
         {total_h:.1f}h &times; ${HOURLY_RATE}/hr blended rate
-        &nbsp;&middot;&nbsp; {n_proj} project{'s' if n_proj != 1 else ''}</div>
+        &nbsp;&middot;&nbsp; {n_proj} Jira ticket{'s' if n_proj != 1 else ''}</div>
     </td>
   </tr>
 
@@ -936,7 +936,7 @@ def main():
 
     # Fetch sessions for the ticket
     all_ticket_sessions = get_sessions_for_ticket(args.ticket, date_filter=dates)
-
+    
     # Print out user chats to stdout as requested
     print(f"\n--- EXTRACTED USER CHATS FOR {args.ticket} ---")
     for s in all_ticket_sessions:
@@ -951,7 +951,7 @@ def main():
         d = s.get("date")
         if d:
             sessions_by_date.setdefault(d, []).append(s)
-
+            
     # Keep date ordering
     ordered_dates = sorted(sessions_by_date.keys())
     for d in ordered_dates:

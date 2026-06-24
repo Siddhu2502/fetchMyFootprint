@@ -361,6 +361,8 @@ def _build_transcript(sessions: list) -> str:
 
         if s.get("session_start") and s.get("session_end"):
             lines.append(f"Time: {s['session_start'][11:19]} → {s['session_end'][11:19]} UTC")
+        if s.get("chat_title"):
+            lines.append(f"Chat title: {s['chat_title']}")
         if s.get("workspace_summary"):
             lines.append(f"Copilot session summary: {s['workspace_summary']}")
         cc = s.get("code_changes", {})
@@ -1021,6 +1023,7 @@ def _summarize_message(text: str, tools: list) -> str:
     return "User collaborated with AI to define logic and accomplish the task."
 
 
+def _fallback_analysis(target_date: str, sessions: list) -> dict:
     goals = []
     for s in sessions:
         user_msgs = [m for m in s["messages"] if m["role"] == "user"]
@@ -1069,7 +1072,7 @@ def _summarize_message(text: str, tools: list) -> str:
                 task["human_hours"] *= cmult
             goal_hours = sum(t["human_hours"] for t in tasks)
         goals.append({
-            "title":       f"Worked on {proj}",
+            "title":       s.get("chat_title") or f"Worked on {proj}",
             "summary":     f"{len(tasks)} task{'s' if len(tasks) != 1 else ''} completed in {proj}.",
             "human_hours": round(goal_hours * 4) / 4,
             "tasks":       tasks,

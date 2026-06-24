@@ -1212,7 +1212,7 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
     # we will rely on reading all logs if date_filter is None.
     # To avoid rewriting the entire harvesting logic, we will scan all chat directories
     # for JSONL files, and only fully parse those that contain the ticket string.
-
+    
     # ── CLI sessions ────────────────────────────────────────────────────
     if SESSION_DIR.exists():
         for session_dir in SESSION_DIR.iterdir():
@@ -1224,7 +1224,7 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
 
             if not events_file.exists():
                 continue
-
+                
             # Fast pre-filter
             try:
                 content = events_file.read_text(encoding="utf-8").lower()
@@ -1237,7 +1237,7 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
             events = _read_jsonl_events(events_file)
             if not events:
                 continue
-
+                
             # Group events by date to reuse _build_session_from_events
             events_by_date = {}
             for e in events:
@@ -1247,7 +1247,7 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
                     if date_filter and d not in date_filter:
                         continue
                     events_by_date.setdefault(d, []).append(e)
-
+            
             for d, day_events in events_by_date.items():
                 session = _build_session_from_events(
                     day_events, d,
@@ -1269,23 +1269,39 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
     # For VS Code, we'll scan chat directories similar to get_vscode_sessions_for_date
     chat_dirs = _get_vscode_chat_dirs()
     if chat_dirs:
-        for chat_dir, cwd_hint, workspace_key in chat_dirs:
+        for chat_dir, cwd_hint, workspace_key, titles in chat_dirs:
             for jsonl_file in chat_dir.glob("*.jsonl"):
                 # Fast pre-filter
+                file_has_ticket = False
                 try:
                     with open(jsonl_file, "r", encoding="utf-8") as f:
-                        content = f.read().lower()
-                        if ticket_lower not in content:
-                            continue
+                        if ticket_lower in f.read().lower():
+                            file_has_ticket = True
                 except Exception:
+                    pass
+
+                title_has_ticket = ticket_lower in titles.get(jsonl_file.stem, "").lower()
+
+                if not file_has_ticket and not title_has_ticket:
                     continue
 
                 creation_ms, hv, lines = _load_vscode_chat_file_lines(jsonl_file)
                 if not creation_ms or lines is None:
                     continue
-
+                
                 # Determine dates present in this file
                 dates_in_file = set()
+                
+                # Check kind=0 header requests
+                for req in hv.get("requests", []):
+                    if isinstance(req, dict) and "timestamp" in req:
+                        ts_ms = req.get("timestamp", 0)
+                        if ts_ms:
+                            ts_iso = _vscode_epoch_to_iso(ts_ms)
+                            if ts_iso:
+                                dates_in_file.add(ts_iso[:10])
+
+                # Check kind=2 chat turns
                 for obj in lines:
                     if obj.get("kind") == 2:
                         for item in obj.get("v", []):
@@ -1295,15 +1311,17 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
                                     ts_iso = _vscode_epoch_to_iso(ts_ms)
                                     if ts_iso:
                                         dates_in_file.add(ts_iso[:10])
-
+                
                 for d in dates_in_file:
                     if date_filter and d not in date_filter:
                         continue
                     session = _parse_vscode_chat_file(jsonl_file, d, cwd_hint)
                     if session is not None:
-                        has_ticket = any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
+                        has_ticket = title_has_ticket or any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
                         if has_ticket:
                             session["_vskey"] = (workspace_key, jsonl_file.stem)
+                            if jsonl_file.stem in titles:
+                                session["chat_title"] = titles[jsonl_file.stem]
                             sessions.append(session)
 
     # Note: VS Code Transcripts (GitHub.copilot-chat/transcripts)
@@ -1323,14 +1341,21 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
             if not tx_dir.is_dir():
                 continue
             cwd_hint = _vscode_workspace_cwd(ws_dir / "workspace.json")
+            db_path = ws_dir / "state.vscdb"
+            titles = _load_vscode_chat_titles(db_path)
             for jsonl_file in tx_dir.glob("*.jsonl"):
                 # Fast pre-filter
+                file_has_ticket = False
                 try:
                     with open(jsonl_file, "r", encoding="utf-8") as f:
-                        content = f.read().lower()
-                        if ticket_lower not in content:
-                            continue
+                        if ticket_lower in f.read().lower():
+                            file_has_ticket = True
                 except Exception:
+                    pass
+
+                title_has_ticket = ticket_lower in titles.get(jsonl_file.stem, "").lower()
+
+                if not file_has_ticket and not title_has_ticket:
                     continue
 
                 # Load buckets
@@ -1348,24 +1373,26 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
                         entrypoint="vscode",
                     )
                     if session is not None:
-                        has_ticket = any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
+                        has_ticket = title_has_ticket or any(ticket_lower in m["text"].lower() for m in session.get("messages", []) if m.get("role") == "user")
                         if has_ticket:
                             # Avoid double counting if chatSessions already has it
                             # We can merge them similar to `get_sessions_for_date`
                             session["_vskey"] = (ws_dir.name, jsonl_file.stem)
+                            if jsonl_file.stem in titles:
+                                session["chat_title"] = titles[jsonl_file.stem]
                             # Let's just append it, we will deduplicate below
                             sessions.append(session)
 
     # Deduplicate and merge transcripts + chatSessions
     final_sessions = []
     vskeys_seen = set()
-
+    
     # We want to merge tokens from chatSessions into transcripts like the original does
     chat_sessions = [s for s in sessions if s.get("_vskey") and s.get("tokens")]
     transcript_sessions = [s for s in sessions if s.get("_vskey") and not s.get("tokens")]
-
+    
     chat_by_key_date = {(s["_vskey"], s["date"]): s for s in chat_sessions}
-
+    
     for s in transcript_sessions:
         key_date = (s["_vskey"], s["date"])
         src = chat_by_key_date.get(key_date)
@@ -1378,19 +1405,21 @@ def get_sessions_for_ticket(ticket: str, date_filter: list = None) -> list:
                 s["inline_model_pricing"] = src["inline_model_pricing"]
             if not s.get("total_api_ms"):
                 s["total_api_ms"] = src.get("total_api_ms", 0)
+            if "chat_title" not in s and "chat_title" in src:
+                s["chat_title"] = src["chat_title"]
             vskeys_seen.add(key_date)
         final_sessions.append(s)
-
+        
     for key_date, cs in chat_by_key_date.items():
         if key_date not in vskeys_seen:
             final_sessions.append(cs)
-
+            
     # Add CLI sessions
     final_sessions.extend([s for s in sessions if not s.get("_vskey")])
 
     for s in final_sessions:
         s.pop("_vskey", None)
-
+        
     # Clean up burn findings token details
     for s in final_sessions:
         for b in s.get("burn_findings", []):
@@ -1449,10 +1478,29 @@ def _vscode_workspace_cwd(workspace_json: Path) -> str:
         return ""
 
 
-def _get_vscode_chat_dirs() -> "list[tuple[Path, str, str]]":
+def _load_vscode_chat_titles(db_path: Path) -> dict:
+    import sqlite3
+    import json
+    titles = {}
+    if db_path.exists():
+        try:
+            with sqlite3.connect(str(db_path)) as db:
+                res = db.execute('SELECT value FROM ItemTable WHERE key="chat.ChatSessionStore.index"').fetchone()
+                if res:
+                    data = json.loads(res[0])
+                    for sid, entry in data.get("entries", {}).items():
+                        title = entry.get("title")
+                        if title and title != "New Chat":
+                            titles[sid] = title
+        except Exception:
+            pass
+    return titles
+
+
+def _get_vscode_chat_dirs() -> "list[tuple[Path, str, str, dict]]":
     """All VS Code Copilot Chat session directories with optional workspace cwd hints.
 
-    Returns a list of ``(chat_dir, workspace_cwd, workspace_key)`` tuples.
+    Returns a list of ``(chat_dir, workspace_cwd, workspace_key, titles_dict)`` tuples.
     ``workspace_cwd`` is the absolute path to the workspace folder for
     workspace-scoped sessions, or ``""`` for empty-window sessions (no
     folder open). ``workspace_key`` is the workspaceStorage hash folder
@@ -1460,11 +1508,13 @@ def _get_vscode_chat_dirs() -> "list[tuple[Path, str, str]]":
     to dedupe against the transcripts harvester which scans the same
     workspaceStorage hashes.
     """
-    results: "list[tuple[Path, str, str]]" = []
+    results: "list[tuple[Path, str, str, dict]]" = []
     for base in _vscode_user_dirs():
         ews = base / "globalStorage" / "emptyWindowChatSessions"
         if ews.is_dir():
-            results.append((ews, "", ""))
+            db_path = base / "globalStorage" / "state.vscdb"
+            titles = _load_vscode_chat_titles(db_path)
+            results.append((ews, "", "", titles))
         ws_root = base / "workspaceStorage"
         if ws_root.is_dir():
             try:
@@ -1478,7 +1528,9 @@ def _get_vscode_chat_dirs() -> "list[tuple[Path, str, str]]":
                 if not chat_dir.is_dir():
                     continue
                 cwd_hint = _vscode_workspace_cwd(ws_dir / "workspace.json")
-                results.append((chat_dir, cwd_hint, ws_dir.name))
+                db_path = ws_dir / "state.vscdb"
+                titles = _load_vscode_chat_titles(db_path)
+                results.append((chat_dir, cwd_hint, ws_dir.name, titles))
     return results
 
 
@@ -1603,13 +1655,15 @@ def get_vscode_sessions_for_date(
     sessions = []
     skip = skip or set()
 
-    for chat_dir, cwd_hint, workspace_key in chat_dirs:
+    for chat_dir, cwd_hint, workspace_key, titles in chat_dirs:
         for jsonl_file in chat_dir.glob("*.jsonl"):
             if (workspace_key, jsonl_file.stem) in skip:
                 continue
             session = _parse_vscode_chat_file(jsonl_file, target_date, cwd_hint)
             if session is not None:
                 session["_vskey"] = (workspace_key, jsonl_file.stem)
+                if jsonl_file.stem in titles:
+                    session["chat_title"] = titles[jsonl_file.stem]
                 sessions.append(session)
 
     return sessions
@@ -1657,6 +1711,8 @@ def get_vscode_transcripts_for_date(
                 continue
             cwd_hint = _vscode_workspace_cwd(ws_dir / "workspace.json")
             workspace_key = ws_dir.name
+            db_path = ws_dir / "state.vscdb"
+            titles = _load_vscode_chat_titles(db_path)
             for jsonl_file in tx_dir.glob("*.jsonl"):
                 # Each transcript is streamed from disk only once per process
                 # and its records bucketed by date (_load_transcript_buckets);
@@ -1675,6 +1731,8 @@ def get_vscode_transcripts_for_date(
                 )
                 if session is not None:
                     session["_vskey"] = (workspace_key, jsonl_file.stem)
+                    if jsonl_file.stem in titles:
+                        session["chat_title"] = titles[jsonl_file.stem]
                     sessions.append(session)
                     harvested.add((workspace_key, jsonl_file.stem))
 
@@ -2014,25 +2072,10 @@ def _parse_vscode_chat_file(
             slot["cached"] = summ_c
             slot["summ_completion"] = summ_comp
 
-    # Seed slots from the header's existing ``requests`` array, then track
-    # the next index so kind=2 appends line up with the kind=1 patches.
     header_requests = hv.get("requests")
-    if isinstance(header_requests, list):
-        for _i, _r in enumerate(header_requests):
-            if not isinstance(_r, dict):
-                continue
-            _s = _slot(_i)
-            _ts = _r.get("timestamp")
-            if isinstance(_ts, (int, float)):
-                _s["ts_ms"] = int(_ts)
-            if _r.get("modelId") and not _s["model"]:
-                _s["model"] = _r["modelId"]
-            if isinstance(_r.get("completionTokens"), int):
-                _s["completion"] = _r["completionTokens"]
-            _apply_req_meta(_s, (_r.get("result") or {}).get("metadata"))
-        next_req_index = len(header_requests)
-    else:
-        next_req_index = 0
+    if isinstance(header_requests, list) and header_requests:
+        lines.insert(0, {"kind": 2, "v": header_requests, "k": ["requests"]})
+    next_req_index = 0
 
     try:
         for obj in lines:
@@ -2098,7 +2141,7 @@ def _parse_vscode_chat_file(
                         continue
 
                     # ── Request (user turn with AI response) ──────────
-                    if "requestId" in item and "message" in item:
+                    if "message" in item:
                         # Allocate this request's absolute array index when
                         # it is first appended, and capture any inline token
                         # metadata it already carries.
