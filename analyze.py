@@ -1021,6 +1021,7 @@ def _summarize_message(text: str, tools: list) -> str:
     return "User collaborated with AI to define logic and accomplish the task."
 
 
+def _fallback_analysis(target_date: str, sessions: list) -> dict:
     goals = []
     for s in sessions:
         user_msgs = [m for m in s["messages"] if m["role"] == "user"]
